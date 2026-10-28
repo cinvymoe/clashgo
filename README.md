@@ -30,6 +30,18 @@ Go 版把这些收成类型化代码，语义由测试锁住。
 
 ## 安装
 
+### 拿一个二进制
+
+已发布的预编译包（linux/darwin/windows × amd64/arm64）：
+
+```bash
+# 最新版，解压后放到 PATH 里
+curl -fsSL https://github.com/cinvymoe/clashgo/releases/latest/download/clashgo-linux-amd64.tar.gz \
+  | tar xz -C /usr/local/bin
+```
+
+以后 `clashgo upgrade --self` 就从这里拉新版（带 checksums.txt 校验与回滚）。
+
 ### 在一台干净机器上从零装起来
 
 ```bash
