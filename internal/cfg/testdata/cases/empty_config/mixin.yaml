@@ -1,0 +1,9 @@
+_custom:
+  system-proxy:
+    enable: true
+mixed-port: 7890
+secret: abc
+rules:
+  prefix:
+    - DOMAIN,a.invalid,DIRECT
+  suffix:

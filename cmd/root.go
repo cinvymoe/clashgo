@@ -56,6 +56,19 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// `version --short` 是自检与脚本用的「最小可用面」：
+			// 它不读任何配置，所以配置损坏时也必须能跑。
+			// selfupdate 的自检正是靠它在替换前验证新二进制。
+			if cmd.Name() == "version" {
+				if f := cmd.Flags().Lookup("short"); f != nil && f.Changed {
+					return nil
+				}
+			}
+			// install 是唯一在「还没有 .env」时就要能跑的命令：
+			// 它就是负责创建 .env 的那一步。跳过 env.Load 与 app.New。
+			if cmd.Name() == "install" {
+				return nil
+			}
 			if baseDir != "" {
 				if err := os.Setenv("CLASHGO_BASE_DIR", baseDir); err != nil {
 					return err
@@ -90,6 +103,7 @@ func newRootCmd() *cobra.Command {
 		newMergeCmd(),
 		newVersionCmd(),
 		newAliasListCmd(),
+		newInstallCmd(),
 	)
 	return root
 }

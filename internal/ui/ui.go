@@ -141,6 +141,12 @@ func (m *Manager) InstallFromBytes(data []byte) (files int, err error) {
 //
 // zashboard 的 release 包结构是 `dist/index.html`，而 mihomo 期望
 // `resources/dist/index.html`，所以这里的顶层目录必须被移除。
+// ExtractZip 解压 zip 到 dest，剥掉共同的顶层目录（如 dist/），并防目录穿越。
+// 对外导出以便 install 包复用。
+func ExtractZip(data []byte, dest string) (int, error) {
+	return extractZip(data, dest)
+}
+
 func extractZip(data []byte, dest string) (int, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {

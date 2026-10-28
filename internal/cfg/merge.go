@@ -21,7 +21,10 @@ func Merge(config, mixin *yaml.Node) (*yaml.Node, error) {
 	cfgRoot := rootNode(config)
 	mixRoot := rootNode(mixin)
 	if cfgRoot == nil {
-		return nil, fmt.Errorf("订阅配置为空")
+		// 空订阅按空映射处理，对齐 yq 表达式里的 `($config // {})`。
+		// 这决定了「装完还没加订阅」时 clashgo on 能不能跑起来：
+		// bash 版在空 config.yaml 上会得到「只有 mixin」的 runtime，Go 版必须一致。
+		cfgRoot = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	}
 	if mixRoot == nil {
 		// 没有 mixin 时，输出就是订阅配置本身（但列表项仍需按下方规则整形成序列）

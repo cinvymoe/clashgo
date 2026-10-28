@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"clashgo/internal/cli"
 	"clashgo/internal/kernel"
 	"clashgo/internal/netutil"
 )
@@ -376,15 +377,42 @@ func newUICmd() *cobra.Command {
 }
 
 func newUpgradeCmd() *cobra.Command {
-	var channel string
+	var (
+		channel   string
+		verbose   bool
+		self      bool
+		releaseCh bool
+		alphaCh   bool
+	)
 	c := &cobra.Command{
 		Use:   "upgrade",
-		Short: "升级内核本体（走 mihomo 的 /upgrade 接口）",
+		Short: "升级内核本体，或升级 clashgo 自身",
+		Long: `默认升级 mihomo 内核（走内核自己的 /upgrade 接口）。
+
+--self 升级 clashgo 自身：从 GitHub Releases 拉最新二进制，
+原子替换当前可执行文件。替换前会做版本自检，坏包不会覆盖掉能用的版本。`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return gApp.Upgrade(cmd.Context(), channel)
+			if self {
+				return gApp.UpgradeSelf(cmd.Context(), "")
+			}
+			// -r / -a 互斥；同时给报错而不是悄悄选一个
+			if releaseCh && alphaCh {
+				return fmt.Errorf("-r/--release 与 -a/--alpha 不能同时使用")
+			}
+			if releaseCh {
+				channel = "release"
+			}
+			if alphaCh {
+				channel = "alpha"
+			}
+			return gApp.Upgrade(cmd.Context(), channel, verbose)
 		},
 	}
 	c.Flags().StringVarP(&channel, "channel", "c", "", "升级通道：release / alpha，留空沿用内核当前设置")
+	c.Flags().BoolVarP(&releaseCh, "release", "r", false, "升级至稳定版（等价 --channel release）")
+	c.Flags().BoolVarP(&alphaCh, "alpha", "a", false, "升级至测试版（等价 --channel alpha）")
+	c.Flags().BoolVarP(&verbose, "verbose", "v", false, "输出内核升级日志")
+	c.Flags().BoolVar(&self, "self", false, "升级 clashgo 自身（从 GitHub Releases）")
 	return c
 }
 
@@ -430,10 +458,18 @@ func newMergeCmd() *cobra.Command {
 }
 
 func newVersionCmd() *cobra.Command {
-	return &cobra.Command{
+	var short bool
+	c := &cobra.Command{
 		Use:   "version",
 		Short: "打印 clashgo 与内核版本",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// --short 只输出一行版本号，供 selfupdate 自检和脚本消费。
+			// 它不读任何配置，因此在配置损坏时也能用。
+			if short {
+				// 走包级输出：此时 gApp 可能因为跳过 env.Load 而是 nil
+				cli.Line("%s", Version)
+				return nil
+			}
 			ctx := cmd.Context()
 			gApp.Out.Line("clashgo %s", Version)
 			st, err := gApp.StatusOf(ctx)
@@ -450,6 +486,8 @@ func newVersionCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&short, "short", false, "只打印版本号（供脚本与自检使用）")
+	return c
 }
 
 // Version 由 -ldflags 注入。

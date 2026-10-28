@@ -30,6 +30,37 @@ Go 版把这些收成类型化代码，语义由测试锁住。
 
 ## 安装
 
+### 在一台干净机器上从零装起来
+
+```bash
+clashgo install --dir /data/project/clashgo-instance
+```
+
+七步全自动：前置检查（root / systemd / curl+tar+gzip）→ 建目录骨架 →
+下载 mihomo 内核并按 CPU 的 AVX2 / SSE4.2 选 v1/v2/v3 档 → 下载 zashboard
+面板并解压 → 生成 `mixin.yaml`（含随机密钥）与 `.env` → 写
+`/etc/systemd/system/mihomo.service` 并 `enable`。
+
+装完接着：
+
+```bash
+clashgo sub add <订阅链接>
+clashgo sub use 1
+clashgo on
+```
+
+常用参数：`--secret`（不指定则随机 6 位）、`--mixed-port`、`--api-port`、
+`--gh-proxy https://ghproxy.com`（国内直连 GitHub release 实测会被重置）、
+`--ui-url`、`--kernel-url`、`--force`、`--dry-run`。
+
+下载带进度条，30 秒收不到数据就判失败（GitHub CDN 常见「建连成功但不给数据」）。
+面板下载失败不算致命错误，内核仍可启动，之后 `clashgo ui update` 补上。
+
+只支持 systemd。bash 版还有 SysVinit / OpenRC / runit / nohup 四个后端共 70 行
+纯 shell，收益远小于维护成本，没有移植。
+
+### 从源码构建
+
 ```bash
 export PATH=$PATH:/usr/local/go/bin HOME=/root   # 本机 Go 不在 PATH，且需 HOME 才能定位模块缓存
 cd /data/project/clashgo
@@ -59,7 +90,9 @@ clashgo proxy [--on|--off]  系统代理开关
 clashgo ui            zashboard 地址
 clashgo ui update     下载最新 zashboard 并原子替换 resources/dist
 clashgo log [-f]      内核日志（透传 journalctl）
-clashgo upgrade [-c alpha|release]  升级内核本体
+clashgo install       全新安装：内核 + 面板 + systemd unit（见上一节）
+clashgo upgrade [-c alpha|release] [-r|-a] [-v]  升级内核本体
+clashgo upgrade --self        升级 clashgo 自身（GitHub Releases，替换前自检）
 clashgo merge -o f.yaml --check     合并并校验
 clashgo restart       重启内核
 clashgo version       版本信息

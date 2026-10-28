@@ -12,15 +12,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"clashgo/internal/api"
 	"clashgo/internal/cfg"
 	"clashgo/internal/cli"
 	"clashgo/internal/env"
+	"clashgo/internal/install"
 	"clashgo/internal/kernel"
 	"clashgo/internal/livecfg"
 	"clashgo/internal/mixin"
 	"clashgo/internal/netutil"
+	"clashgo/internal/selfupdate"
 	"clashgo/internal/shellcfg"
 	"clashgo/internal/sub"
 	"clashgo/internal/ui"
@@ -363,7 +366,7 @@ func (a *App) EditMixin(ctx context.Context) error {
 }
 
 // Upgrade 触发内核自升级。
-func (a *App) Upgrade(ctx context.Context, channel string) error {
+func (a *App) Upgrade(ctx context.Context, channel string, verbose bool) error {
 	if !a.Kernel.Running(ctx) {
 		if err := a.On(ctx); err != nil {
 			return err
@@ -373,16 +376,39 @@ func (a *App) Upgrade(ctx context.Context, channel string) error {
 	if err != nil {
 		return err
 	}
+	before, _ := a.KernelVersion(ctx)
 	a.Out.OKEmoji("⏳", "请求内核升级...")
-	if err := c.Upgrade(ctx, channel); err != nil {
+
+	// --verbose 时边升级边把内核日志推到 stderr。
+	// 升级走的是内核自己的 /upgrade，进度只在内核日志里，所以必须挂 journalctl。
+	stopLogs := func() {}
+	if verbose {
+		stopLogs = a.followKernelLog(ctx)
+	}
+	upErr := c.Upgrade(ctx, channel)
+	stopLogs()
+
+	if upErr != nil {
 		// 内核在「已是最新」时返回非 2xx，这里把这种情况翻译成人话
-		if strings.Contains(err.Error(), "already using latest version") {
+		if strings.Contains(upErr.Error(), "already using latest version") {
 			a.Out.OK("已是最新版本")
 			return nil
 		}
-		return fmt.Errorf("内核升级失败: %w", err)
+		return fmt.Errorf("内核升级失败: %w", upErr)
 	}
 	a.Out.OK("内核升级成功")
+
+	// 升级后内核会自己重启，等 API 回来再读版本号
+	if !a.Kernel.APIReady(ctx) {
+		_ = a.Kernel.Restart(ctx)
+	}
+	if after, err := a.KernelVersion(ctx); err == nil && after != "" {
+		if before != "" && before != after {
+			a.Out.Dim("版本：%s → %s", before, after)
+		} else {
+			a.Out.Dim("版本：%s", after)
+		}
+	}
 	return nil
 }
 
@@ -501,6 +527,129 @@ type Status struct {
 }
 
 // StatusOf 收集状态信息。
+// InstallReporter 把 install 包的汇报接到 CLI 输出。
+type InstallReporter struct{ Out *cli.Terminal }
+
+func (r InstallReporter) Step(name string) {
+	r.Out.OKEmoji("✅", "%s", name)
+}
+
+func (r InstallReporter) Skip(name, reason string) {
+	r.Out.Dim("⏭️  %s：%s", name, reason)
+}
+
+func (r InstallReporter) Detail(format string, args ...any) {
+	r.Out.Dim(format, args...)
+}
+
+// Progress 实现 install.Progresser：同一行覆盖刷新。
+func (r InstallReporter) Progress(label string, done, total int64) {
+	const mb = 1 << 20
+	if total > 0 {
+		fmt.Fprintf(r.Out.Err, "\r  %s  %.1f / %.1f MB（%3d%%）",
+			label, float64(done)/mb, float64(total)/mb, done*100/total)
+		if done >= total {
+			fmt.Fprintln(r.Out.Err)
+		}
+		return
+	}
+	fmt.Fprintf(r.Out.Err, "\r  %s  %.1f MB", label, float64(done)/mb)
+}
+
+// Install 全新安装：内核 + 面板 + 配置 + systemd unit。
+func (a *App) Install(ctx context.Context, o install.Options) error {
+	return install.Run(ctx, o, InstallReporter{Out: a.Out})
+}
+
+// UpgradeSelf 升级 clashgo 自身。
+func (a *App) UpgradeSelf(ctx context.Context, tag string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("无法定位自身可执行文件: %w", err)
+	}
+	if real, rerr := os.Readlink("/proc/self/exe"); rerr == nil {
+		self = real
+	}
+	a.Out.OKEmoji("⏳", "检查 clashgo 更新...")
+	res, err := selfupdate.Update(ctx, self, selfupdate.Options{Tag: tag})
+	if err != nil {
+		return err
+	}
+	if res.UpToDate {
+		a.Out.OK("已是最新版本（%s）", res.To)
+		return nil
+	}
+	a.Out.OK("已升级：%s → %s", orDev(res.From), res.To)
+	a.Out.Dim("产物：%s（%s，sha256 %s）", res.Asset, humanBytes(res.Downloaded), res.SHA256[:12])
+	a.Out.Dim("旧版本备份在 %s.bak", self)
+	return nil
+}
+
+// orDev 把空版本号显示成 dev。
+func orDev(v string) string {
+	if v == "" {
+		return "dev"
+	}
+	return v
+}
+
+// humanBytes 输出「10.1 MB」。
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+}
+
+// KernelVersion 读取内核版本号，读不到时返回空字符串。
+func (a *App) KernelVersion(ctx context.Context) (string, error) {
+	c, err := a.Client()
+	if err != nil {
+		return "", err
+	}
+	v, err := c.Version(ctx)
+	if err != nil {
+		return "", err
+	}
+	if s, ok := v["version"].(string); ok {
+		return s, nil
+	}
+	return "", nil
+}
+
+// followKernelLog 起一个 goroutine 把 journalctl 的输出写到 stderr，
+// 返回的函数用于停止它。`clashgo upgrade -v` 靠这个看到内核自己的下载进度。
+func (a *App) followKernelLog(ctx context.Context) func() {
+	logCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(logCtx, "journalctl", "-u", a.Env.KernelName, "-q", "-f", "-n", "0")
+	cmd.Stdout = a.Out.Err
+	cmd.Stderr = a.Out.Err
+	if err := cmd.Start(); err != nil {
+		cancel()
+		a.Out.Dim("（无法跟踪内核日志：%v）", err)
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	return func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			_ = cmd.Process.Kill()
+		}
+	}
+}
+
 func (a *App) StatusOf(ctx context.Context) (Status, error) {
 	st := Status{SystemProxy: a.SystemProxyEnabled(), UIInstalled: a.UI.Installed()}
 	if state, err := a.Kernel.State(ctx); err == nil {
