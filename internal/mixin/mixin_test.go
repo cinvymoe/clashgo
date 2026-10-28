@@ -14,7 +14,7 @@ const sampleMixin = `_custom:
     enable: true
 mixed-port: 7890
 external-controller: '0.0.0.0:9090'
-secret: gEW3eF
+secret: demo-secret-xyz
 allow-lan: true # 若开启务必设置用户验证以防暴露公网后被滥用
 #authentication:
 #  - "admin:admin123"
@@ -54,7 +54,7 @@ func TestLoadAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := d.String("secret"); got != "gEW3eF" {
+	if got := d.String("secret"); got != "demo-secret-xyz" {
 		t.Errorf("secret = %q", got)
 	}
 	if got := d.Int(0, "mixed-port"); got != 7890 {
