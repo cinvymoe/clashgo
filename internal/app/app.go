@@ -562,7 +562,7 @@ func (a *App) Install(ctx context.Context, o install.Options) error {
 }
 
 // UpgradeSelf 升级 clashgo 自身。
-func (a *App) UpgradeSelf(ctx context.Context, tag string) error {
+func (a *App) UpgradeSelf(ctx context.Context, tag string, pre, dryRun bool) error {
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("无法定位自身可执行文件: %w", err)
@@ -571,7 +571,7 @@ func (a *App) UpgradeSelf(ctx context.Context, tag string) error {
 		self = real
 	}
 	a.Out.OKEmoji("⏳", "检查 clashgo 更新...")
-	res, err := selfupdate.Update(ctx, self, selfupdate.Options{Tag: tag})
+	res, err := selfupdate.Update(ctx, self, selfupdate.Options{Tag: tag, Pre: pre, DryRun: dryRun})
 	if err != nil {
 		return err
 	}
@@ -579,9 +579,24 @@ func (a *App) UpgradeSelf(ctx context.Context, tag string) error {
 		a.Out.OK("已是最新版本（%s）", res.To)
 		return nil
 	}
-	a.Out.OK("已升级：%s → %s", orDev(res.From), res.To)
-	a.Out.Dim("产物：%s（%s，sha256 %s）", res.Asset, humanBytes(res.Downloaded), res.SHA256[:12])
-	a.Out.Dim("旧版本备份在 %s.bak", self)
+	if dryRun {
+		a.Out.OK("发现新版本：%s → %s（--dry-run，未替换）", orDev(res.From), res.To)
+	} else {
+		a.Out.OK("已升级：%s → %s", orDev(res.From), res.To)
+	}
+	short := res.SHA256
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	if res.Verified {
+		a.Out.Dim("产物：%s（%s，sha256 %s，已与 checksums.txt 核对）", res.Asset, humanBytes(res.Downloaded), short)
+	} else {
+		a.Out.Dim("产物：%s（%s，sha256 %s）", res.Asset, humanBytes(res.Downloaded), short)
+		a.Out.Dim("发布里没有 %s，本次未做完整性核对", selfupdate.ChecksumAsset)
+	}
+	if !dryRun {
+		a.Out.Dim("旧版本备份在 %s.bak", self)
+	}
 	return nil
 }
 

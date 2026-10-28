@@ -11,6 +11,7 @@ import (
 	"clashgo/internal/cli"
 	"clashgo/internal/kernel"
 	"clashgo/internal/netutil"
+	"clashgo/internal/selfupdate"
 )
 
 func newOnCmd() *cobra.Command {
@@ -383,6 +384,10 @@ func newUpgradeCmd() *cobra.Command {
 		self      bool
 		releaseCh bool
 		alphaCh   bool
+		selfPre   bool
+		selfRepo  string
+		selfTag   string
+		selfDry   bool
 	)
 	c := &cobra.Command{
 		Use:   "upgrade",
@@ -393,7 +398,12 @@ func newUpgradeCmd() *cobra.Command {
 原子替换当前可执行文件。替换前会做版本自检，坏包不会覆盖掉能用的版本。`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if self {
-				return gApp.UpgradeSelf(cmd.Context(), "")
+				if selfRepo != "" {
+					if err := os.Setenv(selfupdate.RepoEnv, selfRepo); err != nil {
+						return err
+					}
+				}
+				return gApp.UpgradeSelf(cmd.Context(), selfTag, selfPre, selfDry)
 			}
 			// -r / -a 互斥；同时给报错而不是悄悄选一个
 			if releaseCh && alphaCh {
@@ -413,6 +423,10 @@ func newUpgradeCmd() *cobra.Command {
 	c.Flags().BoolVarP(&alphaCh, "alpha", "a", false, "升级至测试版（等价 --channel alpha）")
 	c.Flags().BoolVarP(&verbose, "verbose", "v", false, "输出内核升级日志")
 	c.Flags().BoolVar(&self, "self", false, "升级 clashgo 自身（从 GitHub Releases）")
+	c.Flags().BoolVar(&selfPre, "pre", false, "允许安装预发布版本（配合 --self）")
+	c.Flags().StringVar(&selfRepo, "repo", "", "发布仓库 owner/name（配合 --self，默认 cinvymoe/clashgo）")
+	c.Flags().StringVar(&selfTag, "tag", "", "指定要安装的版本（配合 --self，如 v0.2.0）")
+	c.Flags().BoolVar(&selfDry, "dry-run", false, "只检查是否有新版本，不替换（配合 --self）")
 	return c
 }
 

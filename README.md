@@ -185,6 +185,55 @@ cd /data/project/clashgo && go test ./...
 `internal/cfg` 的 golden test 会现场调用 `bin/yq` 算期望值再逐字节比对 —— 也就是说
 合并引擎的正确性由 bash 版本身来背书。可用 `BIN_YQ` / `CLASHCTL_ROOT` 覆盖路径。
 
+## 发布与自身升级
+
+### 拉取链路（`clashgo upgrade --self`）
+
+1. 跑 `<当前二进制> version --short` 拿到自己的版本
+2. `GET /repos/<repo>/releases/latest`（或 `/releases/tags/<tag>`）
+3. 在 `assets` 里找 `clashgo-<GOOS>-<GOARCH>.tar.gz`（退而求其次找同名裸二进制）；
+   预发布版本默认拒绝，`--pre` 才装
+4. 下载、限制 200MB、超过 30 秒没有收到数据报「下载停滞」（不会一直挂着）
+5. 有 `checksums.txt` 就**强制核对** sha256（记压缩包的哈希或二进制哈希都能对上），不一致直接报错，不动当前文件
+6. 解出二进制 → 写成 `.clashgo-new` → 跑一次 `version --short` 自检 → 备份成 `clashgo.bak` →
+   `rename` 覆盖。任何一步失败都回滚，坏包绝不会盖掉能用的版本
+
+```sh
+clashgo upgrade --self                  # 最新正式版
+clashgo upgrade --self --pre            # 允许预发布
+clashgo upgrade --self --tag v0.2.0     # 装指定版本
+clashgo upgrade --self --repo me/fork   # 从别的仓库拉（fork / 私有分发）
+clashgo upgrade --self --dry-run        # 只检查，不替换
+```
+
+### 发布自己的版本
+
+仓库里已经带了 `release.yml`：打 tag 推上去，Actions 会交叉编译
+linux/darwin/windows × amd64/arm64，产出 6 个 `clashgo-<os>-<arch>.tar.gz`
+加一份 `checksums.txt` 并自动发版。产物名必须和 `internal/selfupdate.AssetName()`
+一致，否则客户端挑不到。
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+不想用 GitHub 也行——`scripts/release.sh v0.2.0` 在本地产出同样的 `dist/`，
+扔到任意静态目录（网盘、内网 nginx）即可：
+
+```sh
+./scripts/release.sh v0.2.0
+# 然后用两个环境变量把客户端指过去
+CLASHGO_API_BASE=https://mirror.example.com/github-api \
+CLASHGO_REPO=me/clashgo clashgo upgrade --self
+```
+
+| 环境变量 | 作用 |
+|---|---|
+| `CLASHGO_REPO` | 发布仓库 `owner/name`，默认 `cinvymoe/clashgo` |
+| `CLASHGO_API_BASE` | API 根地址，默认 `https://api.github.com`（GitHub Enterprise / 镜像站） |
+| `CLASHGO_ENV` | `.env` 路径（多实例） |
+| `CLASHGO_UNIT_DIR` | `install` 写 unit 的目录，默认 `/etc/systemd/system` |
+
 ## 阶段二（未做）
 
 `clashgo daemon` 挂 systemd：watch mixin 变化自动热重载、订阅定时更新（替代 cron）、
