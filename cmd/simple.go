@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -12,19 +13,129 @@ import (
 )
 
 func newOnCmd() *cobra.Command {
-	return &cobra.Command{
+	var printEnv bool
+	c := &cobra.Command{
 		Use:   "on",
 		Short: "开启代理（启动内核 + 写入 proxy.env 与 shell 托管块）",
 		Long: `启动 mihomo，并把代理环境变量写入 ~/.config/clashgo/proxy.env。
 
-shell 托管块由 mixin 里的 _custom.system-proxy.enable 控制：
-开着才会往 ~/.bashrc / ~/.zshrc 追加 source 行。
+会维护以下位置的托管块（存在才写）：
+  ~/.bashrc  ~/.zshrc  ~/.bash_profile  ~/.zprofile  ~/.profile
+  ~/.config/fish/config.fish（fish 语法单独处理）
+以及 systemd 用户环境 ~/.config/environment.d/90-clashgo.conf
+（后者是「已打开的终端 / GUI 应用 / 非 shell 进程」的兼底）。
 
-注意：当前 shell 不会立刻生效，需要 source 或新开终端。`,
+当前已打开的 shell 仍不会自动感知，可以：
+  source ~/.config/clashgo/proxy.env        # 本 shell 立即生效
+  eval "$(clashgo env)"                     # 同上，不用管文件路径
+  clashgo on --print-env | source /dev/stdin # 一行搞定`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return gApp.On(cmd.Context())
 		},
 	}
+	c.Flags().BoolVar(&printEnv, "print-env", false, "开启后用 stdout 输出 export 行，便于 eval \"$(clashgo on --print-env)\"")
+	oldRunE := c.RunE
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if err := oldRunE(cmd, args); err != nil {
+			return err
+		}
+		if printEnv {
+			pe, err := gApp.ProxyEnv()
+			if err != nil {
+				return err
+			}
+			fmt.Print(pe.Render())
+		}
+		return nil
+	}
+	return c
+}
+
+// newEnvCmd 输出可在当前 shell 里 eval 的代理变量赋值。
+// 这是「不想开新终端、也不想改 shell 用法」时最直接的途径。
+func newEnvCmd() *cobra.Command {
+	var shell string
+	c := &cobra.Command{
+		Use:   "env",
+		Short: "输出代理环境变量赋值语句（供 eval / source 使用）",
+		Long: `把当前生效的代理配置输出成 shell 语句。
+
+用法：
+  eval "$(clashgo env)"                          # bash / zsh / sh
+  eval (clashgo env --shell fish)                 # fish
+  clashgo env --shell fish | source              # fish，等价
+
+注意：clashgo 不能直接修改你当前 shell 的环境变量（子进程无法影响父进程），
+所以必须由 shell 自己 eval。`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pe, err := gApp.ProxyEnv()
+			if err != nil {
+				return err
+			}
+			content := pe.Render()
+			switch shell {
+			case "", "sh", "bash", "zsh", "posix":
+				fmt.Print(content)
+			case "fish":
+				fmt.Print(fishExports(content))
+			case "nu", "nushell":
+				fmt.Print(nuExports(content))
+			default:
+				return fmt.Errorf("不支持的 shell：%s（可用 bash/zsh/sh/fish/nu）", shell)
+			}
+			return nil
+		},
+	}
+	c.Flags().StringVar(&shell, "shell", "", "目标 shell：bash/zsh/sh（默认）、fish、nu")
+	return c
+}
+
+// fishExports 把 `export K=V` 逐行转成 `set -gx K V`。
+func fishExports(content string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(content, "\n") {
+		if !strings.HasPrefix(line, "export ") {
+			continue // 注释与空行直接丢弃，避免把说明文字当命令喂给 fish
+		}
+		kv := strings.TrimPrefix(line, "export ")
+		i := strings.Index(kv, "=")
+		if i <= 0 {
+			continue
+		}
+		k, v := kv[:i], kv[i+1:]
+		// 展开 `$other` 形式的上层变量引用：fish 里 $other 会被自动展开
+		fmt.Fprintf(&b, "set -gx %s %s\n", k, v)
+	}
+	return b.String()
+}
+
+// nuExports 输出 nushell 的 $env.NAME = "..." 形式。
+func nuExports(content string) string {
+	var b strings.Builder
+	vals := map[string]string{}
+	var order []string
+	for _, line := range strings.Split(content, "\n") {
+		if !strings.HasPrefix(line, "export ") {
+			continue
+		}
+		kv := strings.TrimPrefix(line, "export ")
+		i := strings.Index(kv, "=")
+		if i <= 0 {
+			continue
+		}
+		vals[kv[:i]] = kv[i+1:]
+		order = append(order, kv[:i])
+	}
+	for _, k := range order {
+		v := vals[k]
+		if strings.HasPrefix(v, "$") {
+			if resolved, ok := vals[strings.TrimPrefix(v, "$")]; ok {
+				v = resolved
+			}
+		}
+		fmt.Fprintf(&b, "$env.%s = %q\n", k, v)
+	}
+	return b.String()
 }
 
 func newOffCmd() *cobra.Command {

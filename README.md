@@ -40,8 +40,10 @@ install -m755 clashgo /usr/local/bin/clashgo     # 可选
 ## 命令
 
 ```
-clashgo on            开启代理：启动内核 + 写 proxy.env + 维护 rc 托管块
+clashgo on            开启代理：启动内核 + 写 proxy.env + 维护 shell 托管块
 clashgo off           关闭代理：停内核 + 清理 proxy.env 与托管块
+clashgo env           输出 export 行，供 eval "$(clashgo env)" 在当前 shell 立即生效
+clashgo env --shell fish|nu   同上，换成 fish / nushell 语法
 clashgo status        内核状态 + API 探测 + 当前订阅
 clashgo doctor        自检，一次列出所有问题（不遇到第一个就中止）
 clashgo sub ls        列出订阅
@@ -82,15 +84,39 @@ TUN 例外：设备只能在启动时创建，所以 `tun on/off` 仍然重启�
 坏 mixin 的后果是**报错 + 旧配置继续服务**，不会留下半截文件。
 内容 md5 未变时完全不碰内核（重复更新订阅没有任何副作用）。
 
-### 3. 不改 shell 函数
+### 3. 不引入 shell 函数壳子，但覆盖所有 shell
 
-Go 改不了父 shell 的环境变量。这里不搞 `eval "$(clashgo env)"` 壳子，而是直接写配置：
+Go 改不了父 shell 的环境变量，所以这里不搞 `eval "$(clashgo env)"` 那种壳子，
+而是**直接写配置文件**。托管块写到所有真实存在的启动文件里：
 
-- `~/.config/clashgo/proxy.env` 放 9 条 `export`
-- `~/.bashrc` / `~/.zshrc` 里维护 `# clashgo START` … `# clashgo END` 托管块 source 它
+| 文件 | 何时生效 |
+|---|---|
+| `~/.bashrc` | 交互式 bash（终端里手敲 `bash`） |
+| `~/.zshrc` | 交互式 zsh |
+| `~/.bash_profile` | 登录 bash（SSH 登录、`bash -l`） |
+| `~/.zprofile` | 登录 zsh |
+| `~/.profile` | `sh` / `dash` / POSIX 通用入口 |
+| `~/.config/fish/config.fish` | fish（语法不同，单独生成） |
+| `~/.config/environment.d/90-clashgo.conf` | systemd --user 会话及其子进程（GUI 应用、非 shell 程序） |
 
-**代价**：`clashgo on` 不影响当前已打开的 shell，需要 `source ~/.bashrc` 或新开终端。
-（bash 版是立即生效的，这是唯一的行为倒退，命令输出里会提示。）
+代理变量的真源仍然是 `~/.config/clashgo/proxy.env`（9 条 `export`）。
+
+**已经开着的终端怎么跟上**：托管块不是简单 source 一次，而是注册一个
+「每个提示符前检查一次」的钩子：
+
+- bash：挂到 `PROMPT_COMMAND`
+- zsh：`add-zsh-hook precmd`
+- fish：`--on-event fish_prompt`
+
+钩子把 `proxy.env` 里的 `http_proxy` 期望值和当前值直接比对，不一致才重新 source。
+全程只用 shell 内建（`read` / `case` / `unset`），**不 fork 任何进程**——
+实测 100 次提示符共 10ms（0.1ms/次）。
+
+于是：在 A 终端跑 `clashgo on`，B 终端（早就开着）下次回车就自动带上代理；
+跑 `clashgo off`，B 终端下次回车自动清掉。不需要重开、不需要手动 source。
+
+**唯一真正需要手动的一次**：想让**当前这一条命令**立刻生效时——
+`eval "$(clashgo env)"`。这是父/子进程的硬限制，任何外部程序都做不到。
 
 托管块与 `clashctl` 的块互不干扰，两者可以共存。
 
@@ -111,7 +137,7 @@ clashgo/
     ├── state/        profiles.yaml 读写
     ├── livecfg/      只读解析已生效的 runtime.yaml
     ├── mixin/        mixin.yaml 读写（保注释）
-    ├── shellcfg/     proxy.env + rc 托管块
+    ├── shellcfg/     proxy.env + rc 托管块 + environment.d
     ├── netutil/      端口探测
     └── cli/          输出与配色
 ```

@@ -123,3 +123,72 @@ func TestUnknownSubcommand(t *testing.T) {
 		t.Fatal("未知子命令应报错")
 	}
 }
+
+// runCapture 执行命令并把写到 os.Stdout 的内容抓回来。
+// env 命令直接 fmt.Print 到 stdout（要能被 eval 管道吃走），所以必须重定向 os.Stdout。
+func runCapture(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var sb strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				sb.Write(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+		done <- sb.String()
+	}()
+	root := newRootCmd()
+	root.SetArgs(args)
+	root.SetOut(os.Stdout)
+	root.SetErr(os.Stdout)
+	err = root.Execute()
+	w.Close()
+	os.Stdout = old
+	return <-done, err
+}
+
+// TestEnvCommandShellForms 三种 shell 语法都要能输出，且不能把注释当命令。
+func TestEnvCommandShellForms(t *testing.T) {
+	setupCmdEnv(t)
+	cases := []struct {
+		shell string
+		want  string
+	}{
+		{"", "export http_proxy=http://127.0.0.1:7890"},
+		{"bash", "export http_proxy=http://127.0.0.1:7890"},
+		{"zsh", "export no_proxy=localhost,127.0.0.1,::1"},
+		{"fish", "set -gx http_proxy http://127.0.0.1:7890"},
+		{"nu", `$env.http_proxy = "http://127.0.0.1:7890"`},
+	}
+	for _, c := range cases {
+		args := []string{"env"}
+		if c.shell != "" {
+			args = append(args, "--shell", c.shell)
+		}
+		out, err := runCapture(t, args...)
+		if err != nil {
+			t.Fatalf("shell=%q: %v", c.shell, err)
+		}
+		if !strings.Contains(out, c.want) {
+			t.Errorf("shell=%q 输出缺少 %q:\n%s", c.shell, c.want, out)
+		}
+		if strings.Contains(out, "# #") {
+			t.Errorf("shell=%q 输出把注释又注释了一次:\n%s", c.shell, out)
+		}
+	}
+	if _, err := runCapture(t, "env", "--shell", "tcsh"); err == nil {
+		t.Error("不支持的 shell 应报错")
+	}
+}

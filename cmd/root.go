@@ -65,6 +65,7 @@ func newRootCmd() *cobra.Command {
 		newSecretCmd(),
 		newTunCmd(),
 		newProxyCmd(),
+		newEnvCmd(),
 		newUICmd(),
 		newLogCmd(),
 		newUpgradeCmd(),

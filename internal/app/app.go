@@ -180,18 +180,31 @@ func (a *App) On(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// 只有 mixin 里开着系统代理才写 rc 托管块，否则用户明确关掉了就别偷偷加回来
+	// 只有 mixin 里开着系统代理才写 shell 托管块，否则用户明确关掉了就别偷偷加回来
+	var touched []string
 	if a.SystemProxyEnabled() {
 		for _, rc := range shellcfg.RcFiles() {
-			if _, err := shellcfg.EnsureBlock(rc); err != nil {
+			changed, err := shellcfg.EnsureBlock(rc)
+			if err != nil {
 				return fmt.Errorf("写入 %s 失败: %w", rc, err)
 			}
+			if changed {
+				touched = append(touched, rc)
+			}
+		}
+		// environment.d 是「已开着的终端 / 非 shell 进程」的兼底，
+		// 本机不是 systemd 时安静跳过。
+		if envPath, err := shellcfg.WriteSystemdEnv(proxyEnv.Render()); err == nil && envPath != "" {
+			touched = append(touched, envPath)
 		}
 	}
 	if a.Kernel.Running(ctx) {
 		a.Out.OK("已开启代理环境")
 		a.Out.Dim("已写入 %s", path)
-		a.Out.Dim("当前 shell 不会立刻生效，请执行 source ~/.bashrc 或新开终端")
+		for _, f := range touched {
+			a.Out.Dim("已接管 %s", f)
+		}
+		a.Out.Dim("当前已打开的 shell 需执行 source <对应配置文件> 或新开终端才会生效")
 	}
 	return nil
 }
@@ -217,8 +230,11 @@ func (a *App) Off(ctx context.Context) error {
 			return fmt.Errorf("清理 %s 失败: %w", rc, err)
 		}
 	}
+	if err := shellcfg.RemoveSystemdEnv(); err != nil {
+		return err
+	}
 	a.Out.OK("已关闭代理环境")
-	a.Out.Dim("当前 shell 里的代理变量需要 source 或新开终端才会消失")
+	a.Out.Dim("当前已打开的 shell 里的代理变量需 source 或新开终端才会消失")
 	return nil
 }
 
@@ -445,7 +461,7 @@ func (a *App) Doctor(ctx context.Context) []string {
 	if _, err := a.Merge(); err != nil {
 		problems = append(problems, fmt.Sprintf("配置合并失败：%v", err))
 	}
-	// rc 托管块
+	// shell 托管块（rc + environment.d）
 	if a.SystemProxyEnabled() {
 		for _, rc := range shellcfg.RcFiles() {
 			data, err := os.ReadFile(rc)
@@ -454,6 +470,13 @@ func (a *App) Doctor(ctx context.Context) []string {
 			}
 			if !strings.Contains(string(data), shellcfg.BlockStart) {
 				problems = append(problems, fmt.Sprintf("mixin 里系统代理是开启的，但 %s 没有 clashgo 托管块", filepath.Base(rc)))
+			}
+		}
+		if shellcfg.SystemdAvailable() {
+			if p, err := shellcfg.SystemdEnvPath(); err == nil {
+				if _, err := os.Stat(p); err != nil {
+					problems = append(problems, "mixin 里系统代理是开启的，但没有写入 environment.d（非 shell 进程拿不到代理变量）")
+				}
 			}
 		}
 	}
