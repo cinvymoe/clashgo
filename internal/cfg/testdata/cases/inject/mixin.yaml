@@ -1,0 +1,5 @@
+proxy-groups:
+  inject:
+    A: [z, x]
+    C: [z, w]
+    NOPE: [ignored]

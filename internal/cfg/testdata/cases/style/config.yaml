@@ -1,0 +1,6 @@
+flow_seq: [1, 2]
+flow_map: {k: 1}
+block_seq:
+  - 1
+quoted: 'v'
+plain: v

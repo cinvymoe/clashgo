@@ -1,0 +1,16 @@
+rules:
+  prefix:
+    - RULE,PRE1
+    - RULE,PRE2
+  suffix:
+    - RULE,SUF
+proxies:
+  prefix:
+    - {name: px, type: ss}
+  suffix:
+    - {name: sx, type: ss}
+proxy-groups:
+  prefix:
+    - {name: GP, type: select}
+  suffix:
+    - {name: GS, type: select}

@@ -1,0 +1,6 @@
+proxies:
+  - {name: a, type: ss, server: old}
+  - {name: b, type: ss, server: keep}
+proxy-groups:
+  - {name: G1, type: url-test, interval: 300}
+  - {name: G2, type: select}

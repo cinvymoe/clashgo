@@ -1,0 +1,4 @@
+_custom:
+  system-proxy:
+    enable: true
+mixed-port: 7890

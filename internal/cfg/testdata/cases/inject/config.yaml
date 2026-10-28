@@ -1,0 +1,4 @@
+proxy-groups:
+  - {name: A, type: select, proxies: [x, y, x]}
+  - {name: B, type: url-test}
+  - {name: C, type: select, proxies: [q]}

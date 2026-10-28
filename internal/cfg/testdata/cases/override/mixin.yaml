@@ -1,0 +1,7 @@
+proxies:
+  override:
+    - {name: a, type: ss, server: new}
+    - {name: absent, type: ss, server: x}
+proxy-groups:
+  override:
+    - {name: G1, type: fallback, interval: 60}

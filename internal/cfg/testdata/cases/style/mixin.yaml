@@ -1,0 +1,7 @@
+flow_seq:
+  - 9
+flow_map:
+  k2: 2
+block_seq: [8]
+quoted: w
+plain: 'w'

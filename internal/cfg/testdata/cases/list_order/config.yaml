@@ -1,0 +1,7 @@
+rules:
+  - RULE,A
+  - RULE,B
+proxies:
+  - {name: p1, type: ss}
+proxy-groups:
+  - {name: G, type: select, proxies: [p1]}
