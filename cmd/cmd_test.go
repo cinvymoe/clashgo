@@ -192,3 +192,36 @@ func TestEnvCommandShellForms(t *testing.T) {
 		t.Error("不支持的 shell 应报错")
 	}
 }
+
+// TestAliasRewrite 别名必须在 cobra 解析之前就改写成子命令，
+// 否则 `clashsub ls` 会被当成「根命令下不存在的子命令 ls」。
+func TestAliasRewrite(t *testing.T) {
+	cases := []struct {
+		argv0 string
+		args  []string
+		want  []string
+	}{
+		{"clashon", []string{"--help"}, []string{"clashgo", "on", "--help"}},
+		{"clashsub", []string{"ls"}, []string{"clashgo", "sub", "ls"}},
+		{"clashoff", nil, []string{"clashgo", "off"}},
+		// 不是别名时不能改动
+		{"clashgo", []string{"status"}, []string{"clashgo", "status"}},
+	}
+	for _, c := range cases {
+		old := os.Args
+		os.Args = append([]string{c.argv0}, c.args...)
+		rewriteAliasArgs()
+		got := append([]string{}, os.Args...)
+		os.Args = old
+		if len(got) != len(c.want) {
+			t.Errorf("%s: 长度不符 got=%v want=%v", c.argv0, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: 第 %d 项 got=%q want=%q (全部 got=%v)", c.argv0, i, got[i], c.want[i], got)
+				break
+			}
+		}
+	}
+}

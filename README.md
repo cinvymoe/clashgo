@@ -156,3 +156,40 @@ cd /data/project/clashgo && go test ./...
 
 `clashgo daemon` 挂 systemd：watch mixin 变化自动热重载、订阅定时更新（替代 cron）、
 API 健康检查、本地 HTTP API。设计见 `docs/design.md` 第八节。
+
+## 从 clashctl 迁移过来
+
+`clashgo` 读的是 clashctl 的 `.env` 与 `resources/`，两个版本共用同一份数据面，
+所以可以随时切回去。要停用 bash 版：
+
+1. 从 `~/.bashrc`、`~/.zshrc` 里删掉 `# clashctl START` … `# clashctl END` 之间的内容
+   （那几行 `source .../clashctl.sh` 是 bash 版唯一的入口）
+2. `/data/project/clashctl/` 整个目录**不要删**——`.env`、`resources/`、`bin/mihomo`
+   和 `mihomo.service` 的 `ExecStart` 都还指着它
+
+### 命令名兼容
+
+`clashon` / `clashoff` / `clashsub` 这些是 clashctl 时代的肌肉记忆。
+`clashgo` 用**软链到同一个二进制**的方式保留它们，按 `$0` 的 basename 分流：
+
+```
+clashon      -> clashgo on        clashsecret  -> clashgo secret
+clashoff     -> clashgo off       clashmixin   -> clashgo mixin
+clashrestart -> clashgo restart   clashtun     -> clashgo tun
+clashstatus  -> clashgo status    clashproxy   -> clashgo proxy
+clashsub     -> clashgo sub       clashui      -> clashgo ui
+                                  clashlog     -> clashgo log
+                                  clashupgrade -> clashgo upgrade
+```
+
+安装（在 `/usr/local/bin` 下建软链，不复制 10MB 二进制）：
+
+```sh
+install -m755 clashgo /usr/local/bin/clashgo
+for n in clashon clashoff clashrestart clashstatus clashsub clashsecret \
+         clashmixin clashtun clashproxy clashui clashlog clashupgrade; do
+    ln -sf /usr/local/bin/clashgo /usr/local/bin/$n
+done
+```
+
+`clashgo aliases` 可以列出当前注册的别名。
