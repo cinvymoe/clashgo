@@ -19,7 +19,7 @@ func newSubCmd() *cobra.Command {
 进程不退出、在途连接不断。`,
 	}
 	c.AddCommand(newSubLsCmd(), newSubAddCmd(), newSubUseCmd(),
-		newSubUpdateCmd(), newSubDelCmd())
+		newSubUpdateCmd(), newSubDelCmd(), newSubScheduleCmd())
 	return c
 }
 
