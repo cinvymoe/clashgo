@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"clashgo/internal/cfg"
 	"clashgo/internal/ui"
 )
 
@@ -42,6 +43,10 @@ type Options struct {
 	// UnitDir 是 systemd unit 的落盘目录，默认 /etc/systemd/system。
 	// 可用 CLASHGO_UNIT_DIR 环境变量覆盖（非标准部署与测试用）。
 	UnitDir string
+	// Ensure 表示「补齐模式」：安装目录可以已经存在（里面有配置），
+	// 只补缺失的运行期资产，绝不覆盖已有文件。
+	// 这是给「配置由外部同步下来、软件本体后装」的场景用的。
+	Ensure bool
 }
 
 // DefaultUnitDir 是 systemd unit 的标准目录。
@@ -82,6 +87,19 @@ const DefaultKernelVersion = "v1.19.33"
 
 // DefaultUIURL 是 zashboard 的官方发布地址。
 const DefaultUIURL = "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
+
+// geoDataAssets 是 mihomo 启动时要在 resources/ 里找到的规则数据。
+// 缺了不会崩，但会卡在 "Can't find MMDB, start download"，
+// 而国内直连 GitHub 下载常常超时 —— 所以安装时就该补齐。
+// 变量而非常量：测试要换成 file:// 本地地址。
+var geoDataAssets = []struct {
+	Name string
+	URL  string
+}{
+	{"Country.mmdb", "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb"},
+	{"geosite.dat", "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"},
+	{"geoip.dat", "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"},
+}
 
 // DefaultMixin 是首次安装时生成的 mixin.yaml 模板。
 // 内容与 bash 版安装后得到的一致（保留全部注释，用户能看懂每项为什么在）。
@@ -236,6 +254,9 @@ func Run(ctx context.Context, o Options, rep Reporter) error {
 		rep.Detail("内核：%s", kernelURL(o))
 		rep.Detail("面板：%s", o.UIURL)
 		rep.Detail("端口：mixed %d，API %d", o.MixedPort, o.APIPort)
+		if o.Ensure {
+			rep.Detail("补齐模式：已有文件一律保留，只补缺失的资产")
+		}
 		rep.Detail("（--dry-run，未做任何改动）")
 		return nil
 	}
@@ -251,21 +272,41 @@ func Run(ctx context.Context, o Options, rep Reporter) error {
 		return err
 	}
 
-	// 4. 面板
-	if err := installUI(ctx, o, rep); err != nil {
+	// 4. 规则数据（Country.mmdb / geosite.dat / geoip.dat）
+	// 缺哪个补哪个。下载失败不致命：内核本身能起，只是首次用到 GEOIP/GEOSITE
+	// 规则时会自己去下载（网络受限时就卡在那里）——所以这里必须说清楚，
+	// 让用户知道可以稍后重跑 `clashgo install --ensure` 补。
+	if err := installGeoData(ctx, o, rep); err != nil {
+		rep.Detail("规则数据没补齐：%v", err)
+		rep.Detail("内核仍可运行；稍后重跑 `clashgo install --ensure` 可补上")
+	}
+
+	// 5. 面板
+	if done, err := installUI(ctx, o, rep); err != nil {
 		// 面板失败不致命：内核能跑，面板可以之后 `clashgo ui update`
 		rep.Detail("面板安装失败（不影响内核）：%v", err)
-	} else {
+	} else if done {
 		rep.Step("安装 zashboard 面板")
 	}
 
-	// 5. 配置文件
-	if err := writeConfigs(o); err != nil {
+	// 6. 配置文件
+	changed, err := writeConfigs(o)
+	if err != nil {
 		return err
 	}
-	rep.Step("生成 mixin.yaml 与 .env")
+	if changed {
+		rep.Step("生成 mixin.yaml 与 .env")
+	} else {
+		rep.Skip("生成 mixin.yaml 与 .env", "已存在，保留原文件")
+	}
 
-	// 6. systemd unit
+	// 7. runtime.yaml：unit 的 -f 指向它，没有这个文件内核起不来。
+	// 它由 config.yaml + mixin.yaml 合并而来，之前只有 `clashgo merge -o` 才会生成。
+	if err := writeRuntime(o, rep); err != nil {
+		return err
+	}
+
+	// 8. systemd unit
 	if err := installUnit(o, rep); err != nil {
 		return err
 	}
@@ -274,9 +315,9 @@ func Run(ctx context.Context, o Options, rep Reporter) error {
 }
 
 func preflight(o Options, rep Reporter) error {
-	// 安装目录已存在且非空 → 需要 --force
-	if entries, err := os.ReadDir(o.BaseDir); err == nil && len(entries) > 0 && !o.Force {
-		return fmt.Errorf("安装目录已存在且非空：%s（加 --force 覆盖）", o.BaseDir)
+	// 安装目录已存在且非空 → 需要 --force；补齐模式例外（它的目的就是往已有目录里补）
+	if entries, err := os.ReadDir(o.BaseDir); err == nil && len(entries) > 0 && !o.Force && !o.Ensure {
+		return fmt.Errorf("安装目录已存在且非空：%s（加 --force 覆盖，或用 --ensure 只补缺失项）", o.BaseDir)
 	}
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("安装需要 root 权限（要写 /etc/systemd/system）")
@@ -402,26 +443,137 @@ func installKernel(ctx context.Context, o Options, rep Reporter) error {
 	return nil
 }
 
-func installUI(ctx context.Context, o Options, rep Reporter) error {
+// installGeoData 补齐 mihomo 需要的规则数据（Country.mmdb / geosite.dat / geoip.dat）。
+// 已存在就跳过 —— 这几个文件各几 MB，重复下载没有意义。
+func installGeoData(ctx context.Context, o Options, rep Reporter) error {
+	resDir := filepath.Join(o.BaseDir, "resources")
+	var missing []int
+	for i, a := range geoDataAssets {
+		target := filepath.Join(resDir, a.Name)
+		if _, err := os.Stat(target); err == nil && !o.Force {
+			continue
+		}
+		missing = append(missing, i)
+	}
+	if len(missing) == 0 {
+		rep.Skip("下载规则数据", "已齐全（"+resDir+"）")
+		return nil
+	}
+	// 逐个下载：一个失败不该拖垮其余（三者互相独立，缺 geosite 也不影响 mmdb）。
+	var failed []string
+	for _, i := range missing {
+		a := geoDataAssets[i]
+		target := filepath.Join(resDir, a.Name)
+		url := withProxy(a.URL, o.GhProxy)
+		rep.Detail("规则数据地址：%s", url)
+		data, err := httpGet(ctx, url, rep, a.Name)
+		if err != nil {
+			rep.Detail("下载 %s 失败：%v", a.Name, err)
+			failed = append(failed, a.Name)
+			continue
+		}
+		if len(data) == 0 {
+			rep.Detail("下载 %s 得到空文件", a.Name)
+			failed = append(failed, a.Name)
+			continue
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			return err
+		}
+		rep.Detail("已写入 %s（%s）", target, humanSize(int64(len(data))))
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("以下规则数据下载失败：%s", strings.Join(failed, ", "))
+	}
+	rep.Step("下载规则数据")
+	return nil
+}
+
+// writeRuntime 生成 runtime.yaml（config.yaml + mixin.yaml 的合并结果）。
+//
+// systemd unit 的 -f 指向这个文件：缺了它内核直接起不来（203/EXEC 之后是
+// "open ... no such file"）。以前只有 `clashgo merge -o` 会写它，于是
+// 「配置同步下来但没跑过 merge」的新机器必然起不来。
+func writeRuntime(o Options, rep Reporter) error {
+	runtimePath := filepath.Join(o.BaseDir, "resources", "runtime.yaml")
+	if _, err := os.Stat(runtimePath); err == nil && !o.Force {
+		rep.Skip("生成 runtime.yaml", "已存在 "+runtimePath)
+		return nil
+	}
+	base, err := os.ReadFile(filepath.Join(o.BaseDir, "resources", "config.yaml"))
+	if err != nil {
+		return fmt.Errorf("读取 config.yaml 失败: %w", err)
+	}
+	mixinData, err := os.ReadFile(filepath.Join(o.BaseDir, "resources", "mixin.yaml"))
+	if err != nil {
+		return fmt.Errorf("读取 mixin.yaml 失败: %w", err)
+	}
+	cfgNode, err := cfg.Parse(base)
+	if err != nil {
+		return fmt.Errorf("解析 config.yaml 失败: %w", err)
+	}
+	mixNode, err := cfg.Parse(mixinData)
+	if err != nil {
+		return fmt.Errorf("解析 mixin.yaml 失败: %w", err)
+	}
+	merged, err := cfg.Merge(cfgNode, mixNode)
+	if err != nil {
+		return fmt.Errorf("合并配置失败: %w", err)
+	}
+	out, err := cfg.Render(merged)
+	if err != nil {
+		return fmt.Errorf("渲染 runtime.yaml 失败: %w", err)
+	}
+	if err := os.WriteFile(runtimePath, out, 0o600); err != nil {
+		return err
+	}
+	rep.Step("生成 runtime.yaml")
+	return nil
+}
+
+// humanSize 把字节数格式化成易读单位（安装汇报用）。
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+}
+
+// installUI 安装面板，返回「这次是否真的装了」（false 表示已存在跳过）。
+func installUI(ctx context.Context, o Options, rep Reporter) (bool, error) {
 	dist := filepath.Join(o.BaseDir, "resources", "dist")
+	// 面板有独立的更新命令（`clashgo ui update`），所以即便 --force 也不重下：
+	// 它 9MB，重复下载只会拖慢重装。
 	if _, err := os.Stat(filepath.Join(dist, "index.html")); err == nil {
 		rep.Skip("下载面板", "已存在 "+dist)
-		return nil
+		return false, nil
 	}
 	zipPath := filepath.Join(o.BaseDir, "resources", "zip", "dist.zip")
 	rep.Detail("面板地址：%s", o.UIURL)
 	data, err := httpGet(ctx, o.UIURL, rep, "面板")
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := os.WriteFile(zipPath, data, 0o644); err != nil {
-		return err
+		return false, err
 	}
 	// 复用 ui 包的解压逻辑：剥掉顶层 dist/ 目录，防穿越
-	return extractDist(data, dist)
+	if err := extractDist(data, dist); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func writeConfigs(o Options) error {
+// writeConfigs 写出 .env / mixin.yaml / config.yaml / profiles.yaml，
+// 返回「这次是否真的写了」（全都没写返回 false）。
+func writeConfigs(o Options) (bool, error) {
+	changed := false
 	envPath := filepath.Join(o.BaseDir, ".env")
 	if _, err := os.Stat(envPath); err == nil && !o.Force {
 		// 已存在就不覆盖（保护用户的 CLASH_BASE_DIR 等设置）
@@ -429,8 +581,9 @@ func writeConfigs(o Options) error {
 		content := strings.ReplaceAll(DefaultEnv, "__BASEDIR__", o.BaseDir)
 		content = strings.ReplaceAll(content, "__VERSION_MIHOMO__", DefaultKernelVersion)
 		if err := os.WriteFile(envPath, []byte(content), 0o644); err != nil {
-			return err
+			return false, err
 		}
+		changed = true
 	}
 
 	mixinPath := filepath.Join(o.BaseDir, "resources", "mixin.yaml")
@@ -439,24 +592,27 @@ func writeConfigs(o Options) error {
 		content = strings.ReplaceAll(content, "7890", fmt.Sprint(o.MixedPort))
 		content = strings.ReplaceAll(content, "0.0.0.0:9090", fmt.Sprintf("0.0.0.0:%d", o.APIPort))
 		if err := os.WriteFile(mixinPath, []byte(content), 0o644); err != nil {
-			return err
+			return false, err
 		}
+		changed = true
 	}
 
 	// config.yaml 与 profiles.yaml 留空/空清单，等用户 clashgo sub add
 	cfgPath := filepath.Join(o.BaseDir, "resources", "config.yaml")
 	if _, err := os.Stat(cfgPath); err != nil || o.Force {
 		if err := os.WriteFile(cfgPath, []byte{}, 0o644); err != nil {
-			return err
+			return false, err
 		}
+		changed = true
 	}
 	metaPath := filepath.Join(o.BaseDir, "resources", "profiles.yaml")
 	if _, err := os.Stat(metaPath); err != nil || o.Force {
 		if err := os.WriteFile(metaPath, []byte("profiles: []\n"), 0o644); err != nil {
-			return err
+			return false, err
 		}
+		changed = true
 	}
-	return nil
+	return changed, nil
 }
 
 func installUnit(o Options, rep Reporter) error {

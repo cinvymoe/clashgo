@@ -96,7 +96,7 @@ func TestWriteConfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 	o := Options{BaseDir: base, Secret: "abc123", MixedPort: 7899, APIPort: 9191}
-	if err := writeConfigs(o); err != nil {
+	if _, err := writeConfigs(o); err != nil {
 		t.Fatal(err)
 	}
 
@@ -142,7 +142,7 @@ func TestWriteConfigsKeepsExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 不带 Force：已有 .env 不能被覆盖
-	if err := writeConfigs(Options{BaseDir: base, Secret: "x"}); err != nil {
+	if _, err := writeConfigs(Options{BaseDir: base, Secret: "x"}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(envPath)
@@ -268,6 +268,7 @@ func TestRunFullInstallInSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	defer withLocalGeoData(t)()
 	r := &rep{}
 	err := Run(context.Background(), Options{
 		BaseDir:   base,
@@ -283,7 +284,9 @@ func TestRunFullInstallInSandbox(t *testing.T) {
 	// 目录与文件
 	for _, p := range []string{
 		".env", "bin/mihomo", "resources/mixin.yaml", "resources/config.yaml",
-		"resources/profiles.yaml", "resources/dist/index.html",
+		"resources/profiles.yaml", "resources/runtime.yaml",
+		"resources/Country.mmdb", "resources/geosite.dat", "resources/geoip.dat",
+		"resources/dist/index.html",
 		"resources/zip/dist.zip", filepath.Join(unitDir, "mihomo.service"),
 	} {
 		if _, err := os.Stat(filepath.Join(base, p)); err != nil {
@@ -300,10 +303,107 @@ func TestRunFullInstallInSandbox(t *testing.T) {
 	} else if fi.Mode().Perm()&0o111 == 0 {
 		t.Errorf("内核没有可执行位：%v", fi.Mode())
 	}
-	for _, want := range []string{"创建目录骨架", "下载并安装内核", "安装 zashboard 面板", "生成 mixin.yaml 与 .env"} {
+	for _, want := range []string{"创建目录骨架", "下载并安装内核", "下载规则数据", "安装 zashboard 面板", "生成 mixin.yaml 与 .env", "生成 runtime.yaml"} {
 		if !r.hasStep(want) {
 			t.Errorf("缺少步骤汇报 %q，实际 %v", want, r.steps)
 		}
+	}
+}
+
+// TestEnsureFillsMissingAssets 覆盖「配置先到、软件后装」的新机场景：
+// 安装目录里已经有同步下来的 mixin.yaml / config.yaml（甚至 .env），
+// 但缺内核、规则数据、runtime.yaml。--ensure 必须补齐这些，
+// 同时**绝不覆盖**已有文件（否则会把同步下来的配置和 secret 冲掉）。
+func TestEnsureFillsMissingAssets(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("需要 root")
+	}
+	if _, err := os.Stat("/run/systemd/system"); err != nil {
+		t.Skip("环境没有 systemd")
+	}
+	defer withLocalGeoData(t)()
+
+	root := t.TempDir()
+	base := filepath.Join(root, "inst")
+	unitDir := filepath.Join(root, "units")
+	resDir := filepath.Join(base, "resources")
+	if err := os.MkdirAll(resDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟 clidot 同步下来的配置：带用户自己的 secret 与端口
+	mixinBody := "mixed-port: 17890\nsecret: synced-secret\n"
+	cfgBody := "proxies: []\n"
+	for name, body := range map[string]string{
+		"mixin.yaml":  mixinBody,
+		"config.yaml": cfgBody,
+	} {
+		if err := os.WriteFile(filepath.Join(resDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	envBody := "KERNEL_NAME=mihomo\nCLASH_BASE_DIR=" + base + "\n"
+	if err := os.WriteFile(filepath.Join(base, ".env"), []byte(envBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	kernelGz := filepath.Join(root, "mihomo.gz")
+	if err := os.WriteFile(kernelGz, gzipOf(t, "/bin/sh"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	zipPath := filepath.Join(root, "dist.zip")
+	if err := os.WriteFile(zipPath, zipOf(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rep{}
+	err := Run(context.Background(), Options{
+		BaseDir:   base,
+		KernelURL: "file://" + kernelGz,
+		UIURL:     "file://" + zipPath,
+		Secret:    "generated-should-not-be-used",
+		UnitDir:   unitDir,
+		Ensure:    true,
+	}, r)
+	if err != nil {
+		t.Fatalf("补齐模式失败: %v", err)
+	}
+
+	// 补齐的资产必须出现
+	for _, p := range []string{
+		"bin/mihomo", "resources/runtime.yaml",
+		"resources/Country.mmdb", "resources/geosite.dat", "resources/geoip.dat",
+	} {
+		if _, err := os.Stat(filepath.Join(base, p)); err != nil {
+			t.Errorf("补齐模式缺少 %s: %v", p, err)
+		}
+	}
+
+	// 已有配置必须原样保留
+	got, err := os.ReadFile(filepath.Join(resDir, "mixin.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != mixinBody {
+		t.Errorf("mixin.yaml 被覆盖了：\n got %q\nwant %q", got, mixinBody)
+	}
+	gotEnv, err := os.ReadFile(filepath.Join(base, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotEnv) != envBody {
+		t.Errorf(".env 被覆盖了：\n got %q\nwant %q", gotEnv, envBody)
+	}
+
+	// runtime.yaml 必须由同步下来的 mixin 生成（含它的 secret）
+	rt, err := os.ReadFile(filepath.Join(resDir, "runtime.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rt), "synced-secret") {
+		t.Errorf("runtime.yaml 没有用同步下来的 secret：\n%s", rt)
+	}
+	if !strings.Contains(string(rt), "17890") {
+		t.Errorf("runtime.yaml 没有用同步下来的端口：\n%s", rt)
 	}
 }
 
@@ -325,6 +425,7 @@ func TestRunInstallIdempotentSkips(t *testing.T) {
 	if err := os.WriteFile(zipPath, zipOf(t), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	defer withLocalGeoData(t)()
 	o := Options{BaseDir: base, KernelURL: "file://" + kernelGz, UIURL: "file://" + zipPath, Secret: "s", UnitDir: unitDir}
 	if err := Run(context.Background(), o, &rep{}); err != nil {
 		t.Fatal(err)
@@ -379,6 +480,30 @@ func zipOf(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+// withLocalGeoData 把规则数据换成 file:// 本地文件，避免测试依赖网络。
+// 返回恢复函数，调用方 defer 之。
+func withLocalGeoData(t *testing.T) func() {
+	t.Helper()
+	dir := t.TempDir()
+	saved := geoDataAssets
+	var next []struct {
+		Name string
+		URL  string
+	}
+	for _, a := range geoDataAssets {
+		p := filepath.Join(dir, a.Name)
+		if err := os.WriteFile(p, []byte("stub-"+a.Name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		next = append(next, struct {
+			Name string
+			URL  string
+		}{a.Name, "file://" + p})
+	}
+	geoDataAssets = next
+	return func() { geoDataAssets = saved }
 }
 
 func TestWithProxy(t *testing.T) {
